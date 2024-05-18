@@ -1,7 +1,3 @@
-Certainly! Here's the updated README.md file with a description section added:
-
----
-
 # Nimble Balance Checker Bot
 
 ![Nimble Balance Checker Bot](https://pasteboard.co/KBM9DmHQ0ImK.png)
