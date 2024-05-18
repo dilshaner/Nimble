@@ -1,3 +1,4 @@
+import sqlite3
 import telebot
 import requests
 import threading
@@ -10,6 +11,54 @@ user_data = {}
 channel_id = -1002077759391
 start_time = time.time()
 
+# SQLite Database setup
+def init_db():
+    conn = sqlite3.connect('nimble_bot.db')
+    c = conn.cursor()
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS user_wallets (
+        chat_id INTEGER,
+        wallet_address TEXT,
+        last_update REAL
+    )
+    ''')
+    conn.commit()
+    conn.close()
+
+def add_wallet_to_db(chat_id, wallet_address):
+    conn = sqlite3.connect('nimble_bot.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO user_wallets (chat_id, wallet_address, last_update) VALUES (?, ?, ?)',
+              (chat_id, wallet_address, time.time()))
+    conn.commit()
+    conn.close()
+
+def get_wallets_from_db():
+    conn = sqlite3.connect('nimble_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM user_wallets')
+    wallets = c.fetchall()
+    conn.close()
+    return wallets
+
+def update_wallet_last_update(chat_id, wallet_address):
+    conn = sqlite3.connect('nimble_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE user_wallets SET last_update = ? WHERE chat_id = ? AND wallet_address = ?',
+              (time.time(), chat_id, wallet_address))
+    conn.commit()
+    conn.close()
+
+def delete_wallet_from_db(chat_id, wallet_address):
+    conn = sqlite3.connect('nimble_bot.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM user_wallets WHERE chat_id = ? AND wallet_address = ?',
+              (chat_id, wallet_address))
+    conn.commit()
+    conn.close()
+
+# Initialize the database
+init_db()
 
 def generate_ascii_graph(earnings_data, time_unit):
     max_earnings = max(earnings_data.values())
@@ -19,7 +68,6 @@ def generate_ascii_graph(earnings_data, time_unit):
         ascii_graph += f"{time_stamp}: {earnings} {'|' * bar_length}\n"
     return ascii_graph
 
-
 def send_loading_animation(chat_id):
     message = bot.send_message(chat_id, "Checking balance [░░░░░░░░░░░░░░] 0%")
     for i in range(1, 11):
@@ -27,7 +75,6 @@ def send_loading_animation(chat_id):
         text = f"Checking balance [{'▒' * i}{'░' * (10 - i)}] {progress}%"
         bot.edit_message_text(chat_id=chat_id, message_id=message.message_id, text=text)
         time.sleep(0.01)  # Adjust the sleep duration to control the speed of animation
-
 
 def get_balance(wallet_address):
     try:
@@ -39,7 +86,6 @@ def get_balance(wallet_address):
             return f"Error: Unable to fetch balance (status code: {response.status_code})"
     except Exception as e:
         return f"An error occurred: {str(e)}"
-
 
 def get_total_earnings(wallet_address):
     try:
@@ -57,7 +103,6 @@ def get_total_earnings(wallet_address):
     except Exception as e:
         return f"An error occurred: {str(e)}"
 
-
 def send_server_stats_to_channel():
     uptime = time.time() - start_time
     num_users = len(user_data)
@@ -68,31 +113,26 @@ def send_server_stats_to_channel():
                f"Number of Wallet Addresses: {num_wallets}")
     bot.send_message(channel_id, message)
 
-
 def update_balances():
     while True:
-        for chat_id, data_list in user_data.items():
-            for data in data_list:
-                if time.time() - data['last_update'] >= 3600:  # 1 hour
-                    balance = get_balance(data['address'])
-                    bot.send_message(chat_id, balance)
-                    data['last_update'] = time.time()
+        wallets = get_wallets_from_db()
+        for chat_id, wallet_address, last_update in wallets:
+            if time.time() - last_update >= 3600:  # 1 hour
+                balance = get_balance(wallet_address)
+                bot.send_message(chat_id, balance)
+                update_wallet_last_update(chat_id, wallet_address)
         time.sleep(60)
-
 
 update_thread = threading.Thread(target=update_balances)
 update_thread.start()
-
 
 def send_periodic_stats():
     while True:
         send_server_stats_to_channel()
         time.sleep(86400)  # 24 hours
 
-
 stats_thread = threading.Thread(target=send_periodic_stats)
 stats_thread.start()
-
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -108,11 +148,9 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, welcome_message, reply_markup=markup)
 
-
 @bot.callback_query_handler(func=lambda call: call.data == 'submit_wallet')
 def submit_wallet(call):
     bot.send_message(call.message.chat.id, "Please send me your Nimble wallet address.")
-
 
 @bot.message_handler(func=lambda message: True)
 def handle_wallet_address(message):
@@ -121,16 +159,11 @@ def handle_wallet_address(message):
     else:
         bot.send_message(message.chat.id, "Invalid Nimble wallet address. Please enter a valid Nimble wallet address.")
 
-
 def save_nimble_address(message):
-    if message.chat.id not in user_data:
-        user_data[message.chat.id] = []
-
-    user_data[message.chat.id].append({'address': message.text.lower(), 'last_update': time.time()})
+    add_wallet_to_db(message.chat.id, message.text.lower())
     send_loading_animation(message.chat.id)  # Display the loading animation
     balance = get_balance(message.text.lower())
     create_inline_button(message)
-
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('remove_'))
 def callback_remove_wallet(call):
@@ -138,38 +171,33 @@ def callback_remove_wallet(call):
     user_id = int(data[1])
     nimble_address = data[2]
 
-    if user_id in user_data:
-        user_data[user_id] = [wallet_data for wallet_data in user_data[user_id] if
-                              wallet_data['address'] != nimble_address]
-        if not user_data[user_id]:  # If no wallets left, remove the user_id entry
-            del user_data[user_id]
-        bot.answer_callback_query(call.id, "Wallet address removed.")
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        create_inline_button(call.message)
-    else:
-        bot.answer_callback_query(call.id, "Wallet address not found.")
-
+    delete_wallet_from_db(user_id, nimble_address)
+    bot.answer_callback_query(call.id, "Wallet address removed.")
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    create_inline_button(call.message)
 
 def create_inline_button(message, wallet_removed=False):
     nimble_buttons = []
-    for wallet_data in user_data.get(message.chat.id, []):
-        nimble_address = wallet_data['address']
-        balance = get_balance(nimble_address)
-        earning_button = telebot.types.InlineKeyboardButton(f"{balance}",
-                                                            callback_data=f'earning_{message.chat.id}_{nimble_address}')
-        nimble_button = telebot.types.InlineKeyboardButton(f"{nimble_address}",
-                                                           callback_data=f'nimble_{message.chat.id}_{nimble_address}')
-        remove_button = telebot.types.InlineKeyboardButton("❌",
-                                                           callback_data=f'remove_{message.chat.id}_{nimble_address}')
-        check_h_button = telebot.types.InlineKeyboardButton("Check (H)",
-                                                            callback_data=f'check_h_{message.chat.id}_{nimble_address}')
-        check_d_button = telebot.types.InlineKeyboardButton("Check (D)",
-                                                            callback_data=f'check_d_{message.chat.id}_{nimble_address}')
-        check_w_button = telebot.types.InlineKeyboardButton("Check (W)",
-                                                            callback_data=f'check_w_{message.chat.id}_{nimble_address}')
+    wallets = get_wallets_from_db()
+    for wallet_data in wallets:
+        chat_id, nimble_address, last_update = wallet_data
+        if chat_id == message.chat.id:
+            balance = get_balance(nimble_address)
+            earning_button = telebot.types.InlineKeyboardButton(f"{balance}",
+                                                                callback_data=f'earning_{message.chat.id}_{nimble_address}')
+            nimble_button = telebot.types.InlineKeyboardButton(f"{nimble_address}",
+                                                               callback_data=f'nimble_{message.chat.id}_{nimble_address}')
+            remove_button = telebot.types.InlineKeyboardButton("❌",
+                                                               callback_data=f'remove_{message.chat.id}_{nimble_address}')
+            check_h_button = telebot.types.InlineKeyboardButton("Check (H)",
+                                                                callback_data=f'check_h_{message.chat.id}_{nimble_address}')
+            check_d_button = telebot.types.InlineKeyboardButton("Check (D)",
+                                                                callback_data=f'check_d_{message.chat.id}_{nimble_address}')
+            check_w_button = telebot.types.InlineKeyboardButton("Check (W)",
+                                                                callback_data=f'check_w_{message.chat.id}_{nimble_address}')
 
-        nimble_buttons.append([earning_button, nimble_button, remove_button])
-        nimble_buttons.append([check_h_button, check_d_button, check_w_button])
+            nimble_buttons.append([earning_button, nimble_button, remove_button])
+            nimble_buttons.append([check_h_button, check_d_button, check_w_button])
 
     markup = telebot.types.InlineKeyboardMarkup()
 
@@ -194,12 +222,10 @@ def create_inline_button(message, wallet_removed=False):
 
     bot.send_message(message.chat.id, message_text, reply_markup=markup)
 
-
 @bot.callback_query_handler(func=lambda call: call.data == 'update_balance')
 def callback_update_balance(call):
     create_inline_button(call.message)
     bot.answer_callback_query(call.id, "Balance updated.")
-
 
 def generate_earnings_table(earnings_data, time_unit):
     table = "+------------+----------------+--------+\n"
@@ -257,7 +283,6 @@ def get_daily_earnings(nimble_address):
         {'date': '2024-05-16', 'time': '', 'amount': 400},
     ]
 
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_w_'))
 def callback_check_w(call):
     data = call.data.split('_')
@@ -274,6 +299,5 @@ def get_weekly_earnings(nimble_address):
         {'date': '2024-05-15', 'time': '', 'amount': 700},
         # More weekly data
     ]
-
 
 bot.polling()
